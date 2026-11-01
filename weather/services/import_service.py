@@ -6,6 +6,7 @@
 
 З етапу 2 один рядок CSV розкладається на два ORM-об'єкти:
 WeatherObservation (загальна погода) + AirQuality (стан повітря, 1:1).
+З етапу 3 для кожного AirQuality одразу обчислюється is_safe_to_go_outside.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from weather.data.database import session_scope
 from weather.data.models import AirQuality, WeatherObservation
 from weather.data.repositories import WeatherObservationRepository
 from weather.domain.enums import WindDirection
+from weather.domain.rules import is_safe_to_go_outside
 
 # колонки CSV -> атрибути WeatherObservation
 OBSERVATION_COLUMNS: dict[str, str] = {
@@ -93,7 +95,10 @@ def _to_entities(record: dict) -> WeatherObservation:
     obs_kwargs["wind_degree"] = int(obs_kwargs["wind_degree"])
     obs_kwargs["wind_kph"] = float(obs_kwargs["wind_kph"])
     obs_kwargs["temperature_celsius"] = float(obs_kwargs["temperature_celsius"])
-    return WeatherObservation(**obs_kwargs, air_quality=AirQuality(**aq_kwargs))
+    air_quality = AirQuality(**aq_kwargs)
+    # етап 3: відповідь «чи варто виходити» обчислюємо одразу при імпорті
+    air_quality.is_safe_to_go_outside = is_safe_to_go_outside(air_quality.as_reading())
+    return WeatherObservation(**obs_kwargs, air_quality=air_quality)
 
 
 class ImportService:

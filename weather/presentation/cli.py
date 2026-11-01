@@ -2,6 +2,7 @@
 
     python -m weather.presentation.cli import [--csv шлях]
     python -m weather.presentation.cli stats
+    python -m weather.presentation.cli fill-go-outside [--all]
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from pathlib import Path
 from weather.config import default_csv_path, get_database_url
 from weather.data.database import make_engine, session_scope
 from weather.data.repositories import AirQualityRepository, WeatherObservationRepository
+from weather.services.air_quality_service import AirQualityService
 from weather.services.import_service import ImportService
 
 
@@ -37,6 +39,16 @@ def cmd_stats(args: argparse.Namespace) -> None:
             print(" ", obs, obs.air_quality)
 
 
+def cmd_fill_go_outside(args: argparse.Namespace) -> None:
+    engine = make_engine()
+    service = AirQualityService(engine)
+    print(f"База: {get_database_url()}")
+    report = service.fill_is_safe_to_go_outside(only_missing=not args.all)
+    print(f"Оновлено: {report.updated} (варто виходити: {report.safe}, не варто: {report.unsafe})")
+    dist = service.distribution()
+    print("Розподіл у таблиці air_quality:", {str(k): v for k, v in dist.items()})
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="weather", description="Погодна БД — CLI")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -47,6 +59,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_stats = sub.add_parser("stats", help="кількість записів у базі")
     p_stats.set_defaults(func=cmd_stats)
+
+    p_fill = sub.add_parser(
+        "fill-go-outside", help="обчислити колонку «чи варто виходити» (етап 3)"
+    )
+    p_fill.add_argument("--all", action="store_true", help="перерахувати всі рядки, не лише NULL")
+    p_fill.set_defaults(func=cmd_fill_go_outside)
     return parser
 
 

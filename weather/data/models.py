@@ -19,6 +19,7 @@ from __future__ import annotations
 from datetime import datetime, time
 
 from sqlalchemy import (
+    Boolean,
     DateTime,
     Enum,
     Float,
@@ -31,6 +32,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from weather.domain.enums import WindDirection
+from weather.domain.rules import AirQualityReading
 
 
 class Base(DeclarativeBase):
@@ -103,7 +105,18 @@ class AirQuality(Base):
     us_epa_index: Mapped[int] = mapped_column(Integer, nullable=False)      # 1 (Good) … 6 (Hazardous)
     gb_defra_index: Mapped[int] = mapped_column(Integer, nullable=False)    # 1 (Low) … 10 (Very High)
 
+    # Етап 3: «Чи варто виходити на вулицю». NULL — ще не обчислено (див. domain/rules.py)
+    is_safe_to_go_outside: Mapped[bool | None] = mapped_column(
+        Boolean,
+        nullable=True,
+        comment="Чи варто виходити на вулицю: NULL — не обчислено, true/false — так/ні",
+    )
+
     observation: Mapped[WeatherObservation] = relationship(back_populates="air_quality")
+
+    def as_reading(self) -> AirQualityReading:
+        """Перетворити ORM-рядок у незалежний від БД об'єкт для бізнес-правила."""
+        return AirQualityReading(us_epa_index=self.us_epa_index, pm2_5=self.pm2_5)
 
     def __repr__(self) -> str:  # pragma: no cover
         return f"<AirQuality obs={self.observation_id} EPA={self.us_epa_index} PM2.5={self.pm2_5}>"

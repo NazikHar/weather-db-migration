@@ -146,3 +146,58 @@ python -m weather.presentation.cli stats
 
 Стан бази: `alembic_version = 0002`, таблиці `weather_observations` (12 колонок) + `air_quality` (10 колонок) —
 `docs/schema_stage2_postgres.sql`.
+
+---
+
+## Етап 3 — колонка «Чи варто виходити на вулицю» (`stage3-go-outside-flag`)
+
+### Формула (варіант 2 — стан повітря)
+
+```
+варто виходити  ⇔  us_epa_index ≤ 2  І  pm2_5 < 35.4 мкг/м³
+```
+
+- `us_epa_index`: 1 Good, 2 Moderate, 3 Unhealthy for sensitive groups, 4 Unhealthy, 5 Very Unhealthy, 6 Hazardous —
+  з рівня 3 EPA радить обмежити перебування на вулиці;
+- `35.4 мкг/м³` — верхня межа категорії «Moderate» для PM2.5 у шкалі EPA AQI. Друга умова страхує від
+  випадків, коли сумарний індекс ще 2, а саме дрібний пил уже високий (таких рядків у датасеті 3 305).
+
+Формула живе в **одному місці** — `weather/domain/rules.py` (`is_safe_to_go_outside(reading)`),
+чиста функція без залежності від БД, + `explain()` для консольного пояснення.
+
+### Де що
+
+| Шар | Файл | Роль |
+|---|---|---|
+| міграція | `alembic/versions/0003_add_is_safe_to_go_outside.py` | лише `ADD COLUMN is_safe_to_go_outside BOOLEAN NULL` (+ COMMENT) |
+| domain | `weather/domain/rules.py` | формула |
+| data | `models.py` → `AirQuality.is_safe_to_go_outside`, `as_reading()`; `repositories.py` → `iter_unfilled()`, `bulk_set_flag()` | зберігання/масове оновлення |
+| services | `weather/services/air_quality_service.py` | **заповнення** колонки для існуючих рядків: читає NULL-рядки пачками по 10 000, застосовує правило, масовий `UPDATE … WHERE id = :id` (executemany) |
+| services | `import_service.py` | нові рядки отримують відповідь одразу при імпорті |
+| presentation | `cli.py fill-go-outside [--all]` | команда запуску |
+
+### Значення за замовчуванням
+
+Колонка створена **без** `DEFAULT` і nullable: `NULL` означає «відповідь ще не обчислено».
+Це свідомо: `DEFAULT false` зробив би всі старі рядки «не виходити» і їх не можна було б відрізнити
+від справді поганого повітря; `DEFAULT true` — навпаки, приховав би небезпечні випадки.
+Після `fill-go-outside` NULL-ів не лишається (перевірено нижче), а нові рядки заповнює імпорт.
+
+### Результат на повному датасеті
+
+```
+$ alembic upgrade head           # 0002 -> 0003, ~0.1 с
+$ python -m weather.presentation.cli fill-go-outside
+Оновлено: 107963 (варто виходити: 87443, не варто: 20520)      # ~15 с
+```
+
+Незалежна перевірка чистим SQL: `count(*) filter (where (us_epa_index<=2 and pm2_5<35.4) <> is_safe_to_go_outside)` = **0**,
+NULL-ів = **0**. Повторний запуск оновлює 0 рядків (ідемпотентно); `--all` перераховує все заново.
+
+| `us_epa_index` | варто (`true`) | не варто (`false`) |
+|---|---|---|
+| 1 | 56 359 | 0 |
+| 2 | 31 084 | 3 305 (PM2.5 ≥ 35.4) |
+| 3–6 | 0 | 17 215 |
+
+Стан бази: `alembic_version = 0003`, `air_quality` + колонка `is_safe_to_go_outside` — `docs/schema_stage3_postgres.sql`.
