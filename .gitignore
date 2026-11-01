@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+# повний датасет (28 МБ) не комітимо — див. README, розділ «Дані»
+data/GlobalWeatherRepository.csv
