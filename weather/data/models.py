@@ -57,12 +57,12 @@ class WeatherObservation(Base):
     last_updated: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
 
     # --- загальні погодні показники ---
-    temperature_celsius: Mapped[float] = mapped_column(Float, nullable=False)
+    temperature_celsius: Mapped[float] = mapped_column(Float(53), nullable=False)
     condition_text: Mapped[str] = mapped_column(String(100), nullable=False)
     humidity: Mapped[int] = mapped_column(Integer, nullable=False)
 
     # --- вітер ---
-    wind_kph: Mapped[float] = mapped_column(Float, nullable=False)
+    wind_kph: Mapped[float] = mapped_column(Float(53), nullable=False)
     wind_degree: Mapped[int] = mapped_column(Integer, nullable=False)
     wind_direction: Mapped[WindDirection] = mapped_column(
         Enum(WindDirection, name="wind_direction", native_enum=True), nullable=False
@@ -96,12 +96,12 @@ class AirQuality(Base):
         unique=True,
     )
 
-    carbon_monoxide: Mapped[float] = mapped_column(Float, nullable=False)   # CO, мкг/м³
-    ozone: Mapped[float] = mapped_column(Float, nullable=False)             # O3, мкг/м³
-    nitrogen_dioxide: Mapped[float] = mapped_column(Float, nullable=False)  # NO2, мкг/м³
-    sulphur_dioxide: Mapped[float] = mapped_column(Float, nullable=False)   # SO2, мкг/м³
-    pm2_5: Mapped[float] = mapped_column(Float, nullable=False)             # PM2.5, мкг/м³
-    pm10: Mapped[float] = mapped_column(Float, nullable=False)              # PM10, мкг/м³
+    carbon_monoxide: Mapped[float] = mapped_column(Float(53), nullable=False)   # CO, мкг/м³
+    ozone: Mapped[float] = mapped_column(Float(53), nullable=False)             # O3, мкг/м³
+    nitrogen_dioxide: Mapped[float] = mapped_column(Float(53), nullable=False)  # NO2, мкг/м³
+    sulphur_dioxide: Mapped[float] = mapped_column(Float(53), nullable=False)   # SO2, мкг/м³
+    pm2_5: Mapped[float] = mapped_column(Float(53), nullable=False)             # PM2.5, мкг/м³
+    pm10: Mapped[float] = mapped_column(Float(53), nullable=False)              # PM10, мкг/м³
     us_epa_index: Mapped[int] = mapped_column(Integer, nullable=False)      # 1 (Good) … 6 (Hazardous)
     gb_defra_index: Mapped[int] = mapped_column(Integer, nullable=False)    # 1 (Low) … 10 (Very High)
 

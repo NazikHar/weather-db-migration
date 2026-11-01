@@ -4,6 +4,8 @@
     python -m weather.presentation.cli stats
     python -m weather.presentation.cli fill-go-outside [--all]
     python -m weather.presentation.cli query --country Ukraine --date 2024-07-15 [--city Kyiv] [--safe|--unsafe]
+    python -m weather.presentation.cli transfer [--keep]     # DATABASE_URL -> TARGET_DATABASE_URL
+    python -m weather.presentation.cli verify
 """
 
 from __future__ import annotations
@@ -13,11 +15,12 @@ import sys
 from datetime import date
 from pathlib import Path
 
-from weather.config import default_csv_path, get_database_url
+from weather.config import default_csv_path, get_database_url, get_target_database_url
 from weather.data.database import make_engine, session_scope
 from weather.data.repositories import AirQualityRepository, WeatherObservationRepository
 from weather.services.air_quality_service import AirQualityService
 from weather.services.import_service import ImportService
+from weather.services.transfer_service import TransferService
 from weather.services.weather_query_service import WeatherQueryService, WeatherReport
 
 
@@ -90,6 +93,29 @@ def cmd_query(args: argparse.Namespace) -> None:
     print(f"\nЗнайдено спостережень: {len(result.reports)}")
 
 
+def cmd_transfer(args: argparse.Namespace) -> None:
+    source, target = make_engine(get_database_url()), make_engine(get_target_database_url())
+    print(f"Джерело: {source.url.render_as_string(hide_password=True)}")
+    print(f"Ціль:    {target.url.render_as_string(hide_password=True)}")
+    report = TransferService(source, target).copy_all(truncate_target=not args.keep)
+    for table, n in report.copied.items():
+        print(f"Скопійовано {table}: {n}")
+
+
+def cmd_verify(args: argparse.Namespace) -> None:
+    source, target = make_engine(get_database_url()), make_engine(get_target_database_url())
+    checks = TransferService(source, target).verify()
+    all_ok = True
+    for c in checks:
+        status = "OK " if c.ok else "РІЗНЯТЬСЯ"
+        all_ok &= c.ok
+        print(f"[{status}] {c.table}: {c.source_count} vs {c.target_count} рядків; "
+              f"sha256 {c.source_digest[:16]}… vs {c.target_digest[:16]}…")
+    print("Бази ідентичні." if all_ok else "Бази відрізняються!")
+    if not all_ok:
+        sys.exit(1)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="weather", description="Погодна БД — CLI")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -115,6 +141,15 @@ def build_parser() -> argparse.ArgumentParser:
     flag.add_argument("--safe", action="store_true", help="лише де варто виходити")
     flag.add_argument("--unsafe", action="store_true", help="лише де не варто виходити")
     p_query.set_defaults(func=cmd_query)
+
+    p_transfer = sub.add_parser(
+        "transfer", help="скопіювати дані DATABASE_URL -> TARGET_DATABASE_URL (етап 5)"
+    )
+    p_transfer.add_argument("--keep", action="store_true", help="не очищати цільову базу перед копіюванням")
+    p_transfer.set_defaults(func=cmd_transfer)
+
+    p_verify = sub.add_parser("verify", help="звірити дві бази (кількість рядків + sha256)")
+    p_verify.set_defaults(func=cmd_verify)
     return parser
 
 

@@ -244,3 +244,55 @@ India — New Delhi   2024-11-20 14:15
 3. **presentation** — `cli.py query` лише розбирає аргументи і форматує вивід.
 
 Схема бази на цьому етапі не змінюється (`alembic_version = 0003`).
+
+---
+
+## Етап 5 — міграція PostgreSQL → MySQL (`stage5-migrate-to-mysql`)
+
+Ідея: **схему** на новій СУБД створюють ті самі Alembic-міграції `0001…0004` (змінюється лише
+`DATABASE_URL`), а **дані** переносить `TransferService` зі збереженням первинних ключів,
+після чого обидві бази звіряються по SHA-256.
+
+```bash
+# 1. схема на MySQL — ті самі скрипти
+mysql -e "CREATE DATABASE weather_mysql CHARACTER SET utf8mb4; CREATE USER 'weather'@'localhost' IDENTIFIED BY 'weather'; GRANT ALL ON weather_mysql.* TO 'weather'@'localhost';"
+DATABASE_URL='mysql+pymysql://weather:weather@localhost:3306/weather_mysql?charset=utf8mb4' alembic upgrade head
+
+# 2. дані Postgres -> MySQL
+export DATABASE_URL=postgresql+psycopg2://weather:weather@localhost:5432/weather_pg
+export TARGET_DATABASE_URL='mysql+pymysql://weather:weather@localhost:3306/weather_mysql?charset=utf8mb4'
+python -m weather.presentation.cli transfer        # ~7 с для 2 × 107 963 рядків
+python -m weather.presentation.cli verify
+```
+
+```
+[OK ] weather_observations: 107963 vs 107963 рядків; sha256 90cb64ca7a05e35f… vs 90cb64ca7a05e35f…
+[OK ] air_quality:          107963 vs 107963 рядків; sha256 cd0b9ae4c314504f… vs cd0b9ae4c314504f…
+Бази ідентичні.
+```
+
+`verify` читає обидві таблиці у порядку `id`, нормалізує значення (bool → 0/1, float → 6 знаків,
+enum → рядок, datetime/time → ISO) і рахує SHA-256 канонічного дампа — тож порівнюються саме дані,
+а не формат представлення у конкретній СУБД.
+
+Зворотний напрям перевірено так само (`DATABASE_URL`=MySQL, `TARGET_DATABASE_URL`=чиста Postgres-база
+`weather_test`): дані повернулися з тими самими хешами.
+
+Увесь застосунок (`import`, `fill-go-outside`, `query`) далі працює проти MySQL без змін у коді —
+достатньо іншого `DATABASE_URL`. Повний цикл `alembic downgrade base` → `upgrade head` на MySQL
+теж проходить (14 с / 0.6 с).
+
+### Проблеми, що трапилися, і як вирішено
+
+| # | Проблема | Рішення |
+|---|---|---|
+| 1 | `sa.Float()` без точності — у Postgres `double precision` (8 байт), у MySQL `FLOAT` (4 байти, ~7 значущих цифр): значення округлялися б і контрольні суми не збіглися б | нова міграція **`0004_widen_floats_to_double`**: `Float(precision=53)` → `DOUBLE` в обох СУБД; у Postgres — no-op. Моделі оновлено на `Float(53)` |
+| 2 | У Postgres sequence не рухається при вставці з явними `id` → наступний `INSERT` дав би конфлікт PK | `TransferService._fix_sequences()`: `setval(pg_get_serial_sequence(...), max(id)+1)` лише для діалекту postgresql; MySQL підтягує `AUTO_INCREMENT` сам |
+| 3 | MySQL не має транзакційного DDL: якщо міграція впаде посередині, схема лишиться напівзміненою (Alembic чесно пише `Will assume non-transactional DDL`) | міграції зроблено дрібними й оборотними; перед накочуванням на бойову базу — `mysqldump` |
+| 4 | `Boolean` у MySQL — це `TINYINT(1)`, драйвер повертає `0/1`, а не `True/False` | нормалізація у `verify`; ORM сам приводить до `bool` |
+| 5 | `TIME` у MariaDB повертається драйвером як `timedelta` | SQLAlchemy-діалект MySQL конвертує в `datetime.time` — спрацювало без втручання |
+| 6 | `COMMENT` з кирилицею виглядав як `????` у консолі `mysql` | це лише клієнт із charset `latin1`; в `information_schema` текст коректний; підключення — `?charset=utf8mb4` |
+| 7 | Назви колонок датасету `PM2.5`, `us-epa-index` вимагали б різного цитування (`"…"` vs `` `…` ``) | нормалізовано до `pm2_5`, `us_epa_index` ще на етапі 1 |
+| 8 | `drop_table` у Postgres не видаляє тип `ENUM wind_direction` | явний `Enum(...).drop()` у `downgrade()` 0001 |
+
+Стан баз: `alembic_version = 0004` в обох — `docs/schema_stage5_postgres.sql`, `docs/schema_stage5_mysql.sql`.
