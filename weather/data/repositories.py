@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date, datetime, timedelta
 from typing import Iterable, Iterator, Sequence
 
 from sqlalchemy import func, select, update
@@ -44,6 +45,49 @@ class WeatherObservationRepository:
         if limit:
             stmt = stmt.limit(limit)
         return self.session.scalars(stmt).all()
+
+
+    def find(
+        self,
+        country: str,
+        day: date,
+        city: str | None = None,
+        safe_only: bool | None = None,
+    ) -> Sequence[WeatherObservation]:
+        """Спостереження за країною та календарною датою (+ необов'язкові фільтри).
+
+        Фільтр за датою зроблено як діапазон [day 00:00, day+1 00:00), а не через
+        DATE(last_updated): так запит переносимий і використовує індекс по last_updated.
+        Порівняння назв — без урахування регістру.
+        """
+        start = datetime.combine(day, datetime.min.time())
+        end = start + timedelta(days=1)
+        stmt = (
+            select(WeatherObservation)
+            .join(WeatherObservation.air_quality)
+            .options(selectinload(WeatherObservation.air_quality))
+            .where(
+                func.lower(WeatherObservation.country) == country.lower(),
+                WeatherObservation.last_updated >= start,
+                WeatherObservation.last_updated < end,
+            )
+            .order_by(WeatherObservation.location_name, WeatherObservation.last_updated)
+        )
+        if city:
+            stmt = stmt.where(func.lower(WeatherObservation.location_name) == city.lower())
+        if safe_only is not None:
+            stmt = stmt.where(AirQuality.is_safe_to_go_outside.is_(safe_only))
+        return self.session.scalars(stmt).all()
+
+    def countries_like(self, prefix: str, limit: int = 10) -> Sequence[str]:
+        """Підказка назв країн для повідомлення «нічого не знайдено»."""
+        return self.session.scalars(
+            select(WeatherObservation.country)
+            .distinct()
+            .where(func.lower(WeatherObservation.country).like(f"%{prefix.lower()}%"))
+            .order_by(WeatherObservation.country)
+            .limit(limit)
+        ).all()
 
 
 class AirQualityRepository:

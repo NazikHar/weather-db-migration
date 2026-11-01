@@ -201,3 +201,46 @@ NULL-ів = **0**. Повторний запуск оновлює 0 рядків
 | 3–6 | 0 | 17 215 |
 
 Стан бази: `alembic_version = 0003`, `air_quality` + колонка `is_safe_to_go_outside` — `docs/schema_stage3_postgres.sql`.
+
+---
+
+## Етап 4 — консольний запит за країною та датою (`stage4-query-cli`)
+
+```bash
+python -m weather.presentation.cli query --country Ukraine --date 2024-07-15
+python -m weather.presentation.cli query --country India --date 2024-11-20 --city "New Delhi"
+python -m weather.presentation.cli query --country Ukraine --date 2024-07-15 --unsafe   # лише «не варто виходити»
+```
+
+Обов'язкові параметри: `--country` (англійська назва, регістр не важливий), `--date` (`YYYY-MM-DD`).
+Додаткові: `--city`, `--safe` / `--unsafe`. Виводиться **вся** інформація, що є в базі,
+з обох таблиць: погода, вітер, схід/захід, 8 показників стану повітря з розшифровкою індексу EPA
+та відповідь «чи варто виходити» з поясненням, чому саме.
+
+```
+======================================================================
+India — New Delhi   2024-11-20 14:15
+======================================================================
+  Погода:            Mist, +25.2 °C, вологість 34 %
+  Вітер:             4.0 км/год, 337° (NNW)
+  Схід / захід:      06:48 / 17:26
+  Стан повітря (мкг/м³):
+    CO   2887.8   O3   75.0   NO2   70.1   SO2   54.2
+    PM2.5  171.5   PM10  172.8
+    US EPA index: 5 (Very Unhealthy),   GB DEFRA index: 10
+  Чи варто виходити: НІ  →  ні — US EPA index = 5 (> 2); PM2.5 = 171.5 мкг/м³ (≥ 35.4)
+```
+
+Якщо нічого не знайдено — пропонуються схожі назви країн (`Ukr` → «Можливо, ви мали на увазі: Ukraine»).
+Некоректний формат дати → зрозуміле повідомлення й код виходу 1.
+
+### Як це зроблено (у три кроки / шари)
+
+1. **data** — `WeatherObservationRepository.find()`: один `SELECT … JOIN air_quality` з фільтром за датою
+   як діапазоном `[день 00:00, день+1 00:00)` (а не `DATE(last_updated)` — так працює індекс
+   `ix_weather_observations_last_updated` і запит переносимий між Postgres/MySQL) та `lower(country) = lower(:c)`.
+2. **services** — `WeatherQueryService` перетворює ORM-об'єкти з двох таблиць на один плоский DTO `WeatherReport`
+   і додає `explain()` із domain-правила. Шар представлення не знає ні про SQLAlchemy, ні про те, що таблиць дві.
+3. **presentation** — `cli.py query` лише розбирає аргументи і форматує вивід.
+
+Схема бази на цьому етапі не змінюється (`alembic_version = 0003`).

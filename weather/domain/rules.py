@@ -40,7 +40,7 @@ def explain(reading: AirQualityReading) -> str:
     if reading.us_epa_index > EPA_INDEX_MAX_OK:
         reasons.append(f"US EPA index = {reading.us_epa_index} (> {EPA_INDEX_MAX_OK})")
     if reading.pm2_5 >= PM2_5_MAX_OK:
-        reasons.append(f"PM2.5 = {reading.pm2_5} мкг/м³ (≥ {PM2_5_MAX_OK})")
+        reasons.append(f"PM2.5 = {reading.pm2_5:.1f} мкг/м³ (≥ {PM2_5_MAX_OK})")
     if not reasons:
         return "так — повітря чисте (EPA ≤ 2, PM2.5 < 35.4)"
     return "ні — " + "; ".join(reasons)
