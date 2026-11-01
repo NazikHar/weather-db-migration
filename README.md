@@ -296,3 +296,82 @@ enum → рядок, datetime/time → ISO) і рахує SHA-256 каноніч
 | 8 | `drop_table` у Postgres не видаляє тип `ENUM wind_direction` | явний `Enum(...).drop()` у `downgrade()` 0001 |
 
 Стан баз: `alembic_version = 0004` в обох — `docs/schema_stage5_postgres.sql`, `docs/schema_stage5_mysql.sql`.
+
+---
+
+## Записка: особливості переходу між етапами
+
+| Перехід | Що змінюється у схемі | Що змінюється у коді | На що звернути увагу |
+|---|---|---|---|
+| ∅ → 1 | `0001`: таблиця `weather_observations` (20 колонок), ENUM `wind_direction`, унікальний ключ | ORM, imports, CLI `import`/`stats` | ORM описує 19 із 41 колонок CSV; `sunrise` парситься з `04:50 AM` |
+| 1 → 2 | `0002`: `+air_quality`, `INSERT…SELECT`, `−8 колонок` | `AirQuality` + `relationship` 1:1; імпорт пише у 2 таблиці | expand → migrate → contract в одній міграції; контрольні суми до/після збігаються; `downgrade` відновлює колонки |
+| 2 → 3 | `0003`: `+air_quality.is_safe_to_go_outside BOOLEAN NULL` | `domain/rules.py`, `AirQualityService`, CLI `fill-go-outside`; імпорт заповнює одразу | колонка без DEFAULT (NULL = не обчислено); заповнення — у сервісі, не в міграції |
+| 3 → 4 | — | `find()` у репозиторії, `WeatherQueryService` (DTO), CLI `query` | фільтр по даті діапазоном, а не `DATE()`; `lower()` для регістру |
+| 4 → 5 | `0004`: `Float → Float(53)` (DOUBLE) | `TransferService`, CLI `transfer`/`verify`; `TARGET_DATABASE_URL` | `0004` з'явилася саме через MySQL (`FLOAT` 4 байти); sequence у Postgres після явних id; non-transactional DDL у MySQL |
+
+Міграції дозволяють **і створити базу з нуля** (`alembic upgrade head` на порожній базі → одразу схема
+етапу 5), **і домігрувати існуючу** (база, що зупинилась на `0002`, отримає лише `0003` і `0004`).
+Дані при цьому не втрачаються — кожна міграція має робочий `downgrade`, перевірений на повному датасеті.
+
+## Відповіді на питання до роботи
+
+**1. Чи можна завантажувати всю базу, а описувати в ORM-моделі тільки деякі колонки?**
+Так — і саме так зроблено. ORM-модель не зобов'язана відтворювати CSV: `import_service.read_csv()`
+читає всі 41 колонку датасету, а в базу потрапляють лише 19, описані в моделях (`OBSERVATION_COLUMNS`
++ `AIR_QUALITY_COLUMNS`). Решта (`temperature_fahrenheit`, `pressure_in`, фази місяця тощо) відкидається.
+Можливий і інший варіант — завантажити всі 41 колонку в «сиру» таблицю, а в ORM описати лише потрібні:
+SQLAlchemy працюватиме, бо `SELECT`/`INSERT` генеруються тільки для відомих їй колонок (решта мають бути
+nullable або мати DEFAULT). Ми обрали перший шлях, щоб база не містила даних, якими ніхто не користується.
+
+**2. Чи є дефолтне значення у колонці «Чи варто виходити на вулицю»?**
+Ні, навмисно. Колонка `is_safe_to_go_outside` створена як `BOOLEAN NULL` без `DEFAULT`.
+`NULL` означає «відповідь ще не обчислена» — це третій, чесний стан. `DEFAULT false` позначив би всі
+старі рядки як «не виходити» і їх не можна було б відрізнити від справді забрудненого повітря;
+`DEFAULT true` — приховав би небезпечні випадки. Після `fill-go-outside` NULL-ів у таблиці немає,
+а для нових рядків відповідь обчислюється ще при імпорті, тож у звичайній роботі NULL не з'являється.
+
+**3. У скільки етапів зроблено 3-тє завдання (колонка «чи варто виходити»)?**
+У три: (а) міграція `0003` додає колонку (лише схема); (б) бізнес-правило як чиста функція у
+`weather/domain/rules.py`; (в) сервіс `AirQualityService.fill_is_safe_to_go_outside()` заповнює
+існуючі 107 963 рядки пачками по 10 000 через масовий `UPDATE`, а `import_service` застосовує те саме
+правило до нових рядків. Плюс незалежна перевірка SQL-запитом (0 розбіжностей).
+
+**4. На яку частину застосунку покладено функцію заповнення колонки даними?**
+На **сервісний шар** (`weather/services/air_quality_service.py`), а сама формула — у **шарі предметної
+області** (`weather/domain/rules.py`). Міграція лише змінює схему. Так формула існує в одному місці
+(не дублюється у SQL міграції і в Python), її можна тестувати без БД, змінити пороги й перерахувати
+(`fill-go-outside --all`), і вона однаково працює в Postgres і MySQL. Альтернатива — `UPDATE` прямо у
+міграції або тригер/generated column у БД — прив'язала б правило до SQL-діалекту і розмазала б логіку по шарах.
+
+**5. Чи легко було накочувати міграції та переходити з однієї бази на іншу? Які проблеми траплялись?**
+Накочування — легко: ті самі чотири файли `alembic upgrade head` виконалися на MySQL за 0.6 с без змін,
+бо міграції написані через переносимі конструкції Alembic (`op.create_table`, `batch_alter_table`,
+`INSERT … SELECT`, корельований `UPDATE`) без діалект-специфічного SQL. Перенесення даних — 7 с, хеші
+двох баз збіглися. Проблеми були (детальна таблиця в розділі етапу 5): головна — `Float` став `FLOAT(4 байти)`
+у MySQL, довелося додати міграцію `0004`; далі — sequence у Postgres після вставки з явними `id`,
+відсутність транзакційного DDL у MySQL, `Boolean` → `TINYINT`, відображення кирилиці в консолі `mysql`,
+різне цитування ідентифікаторів (вирішено нормалізацією назв ще на етапі 1), окреме видалення типу
+`ENUM` у Postgres при `downgrade`.
+
+## Структура файлів
+
+```
+.
+├── README.md                       ← ця записка
+├── requirements.txt, .env.example, alembic.ini
+├── alembic/
+│   ├── env.py                      ← URL з DATABASE_URL
+│   └── versions/
+│       ├── 0001_initial_weather_observations.py
+│       ├── 0002_extract_air_quality_table.py
+│       ├── 0003_add_is_safe_to_go_outside.py
+│       └── 0004_widen_floats_to_double.py
+├── weather/
+│   ├── config.py
+│   ├── domain/   enums.py, rules.py
+│   ├── data/     models.py, repositories.py, database.py
+│   ├── services/ import_service.py, air_quality_service.py, weather_query_service.py, transfer_service.py
+│   └── presentation/cli.py
+├── data/sample_weather.csv
+└── docs/schema_stage{1,2,3,5}_postgres.sql, schema_stage5_mysql.sql
+```
