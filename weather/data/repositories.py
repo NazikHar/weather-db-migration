@@ -5,9 +5,9 @@ from __future__ import annotations
 from typing import Iterable, Sequence
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
-from weather.data.models import WeatherObservation
+from weather.data.models import AirQuality, WeatherObservation
 
 
 class WeatherObservationRepository:
@@ -28,15 +28,27 @@ class WeatherObservationRepository:
         )
         return {tuple(r) for r in rows}
 
-    def bulk_insert(self, rows: Iterable[dict]) -> int:
-        """Масова вставка словників (без створення ORM-об'єктів — швидше)."""
-        rows = list(rows)
-        if rows:
-            self.session.execute(WeatherObservation.__table__.insert(), rows)
-        return len(rows)
+    def add_all(self, observations: Iterable[WeatherObservation]) -> int:
+        """Додати ORM-об'єкти (разом із пов'язаними AirQuality) і скинути в БД."""
+        observations = list(observations)
+        self.session.add_all(observations)
+        self.session.flush()
+        return len(observations)
 
     def all(self, limit: int | None = None) -> Sequence[WeatherObservation]:
-        stmt = select(WeatherObservation).order_by(WeatherObservation.id)
+        stmt = (
+            select(WeatherObservation)
+            .options(selectinload(WeatherObservation.air_quality))
+            .order_by(WeatherObservation.id)
+        )
         if limit:
             stmt = stmt.limit(limit)
         return self.session.scalars(stmt).all()
+
+
+class AirQualityRepository:
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def count(self) -> int:
+        return self.session.scalar(select(func.count()).select_from(AirQuality)) or 0

@@ -1,8 +1,11 @@
 """Імпорт датасету Global Weather Repository (CSV) у базу даних.
 
 Читаємо ВЕСЬ CSV (41 колонка), але у БД записуємо лише ті колонки, що описані
-в ORM-моделі. Повторний запуск не створює дублікатів: рядки, чиї натуральні ключі
+в ORM-моделях. Повторний запуск не створює дублікатів: рядки, чиї натуральні ключі
 (country, location_name, last_updated) вже є в базі, пропускаються.
+
+З етапу 2 один рядок CSV розкладається на два ORM-об'єкти:
+WeatherObservation (загальна погода) + AirQuality (стан повітря, 1:1).
 """
 
 from __future__ import annotations
@@ -15,11 +18,12 @@ import pandas as pd
 from sqlalchemy.engine import Engine
 
 from weather.data.database import session_scope
+from weather.data.models import AirQuality, WeatherObservation
 from weather.data.repositories import WeatherObservationRepository
 from weather.domain.enums import WindDirection
 
-# назва колонки CSV -> назва атрибута ORM
-CSV_TO_ORM: dict[str, str] = {
+# колонки CSV -> атрибути WeatherObservation
+OBSERVATION_COLUMNS: dict[str, str] = {
     "country": "country",
     "location_name": "location_name",
     "last_updated": "last_updated",
@@ -31,14 +35,18 @@ CSV_TO_ORM: dict[str, str] = {
     "wind_direction": "wind_direction",
     "sunrise": "sunrise",
     "sunset": "sunset",
-    "air_quality_Carbon_Monoxide": "air_quality_carbon_monoxide",
-    "air_quality_Ozone": "air_quality_ozone",
-    "air_quality_Nitrogen_dioxide": "air_quality_nitrogen_dioxide",
-    "air_quality_Sulphur_dioxide": "air_quality_sulphur_dioxide",
-    "air_quality_PM2.5": "air_quality_pm2_5",
-    "air_quality_PM10": "air_quality_pm10",
-    "air_quality_us-epa-index": "air_quality_us_epa_index",
-    "air_quality_gb-defra-index": "air_quality_gb_defra_index",
+}
+
+# колонки CSV -> атрибути AirQuality
+AIR_QUALITY_COLUMNS: dict[str, str] = {
+    "air_quality_Carbon_Monoxide": "carbon_monoxide",
+    "air_quality_Ozone": "ozone",
+    "air_quality_Nitrogen_dioxide": "nitrogen_dioxide",
+    "air_quality_Sulphur_dioxide": "sulphur_dioxide",
+    "air_quality_PM2.5": "pm2_5",
+    "air_quality_PM10": "pm10",
+    "air_quality_us-epa-index": "us_epa_index",
+    "air_quality_gb-defra-index": "gb_defra_index",
 }
 
 BATCH_SIZE = 5_000
@@ -61,10 +69,11 @@ def _parse_time(value: str):
 
 def read_csv(path: Path) -> pd.DataFrame:
     df = pd.read_csv(path)
-    missing = set(CSV_TO_ORM) - set(df.columns)
+    needed = {**OBSERVATION_COLUMNS, **AIR_QUALITY_COLUMNS}
+    missing = set(needed) - set(df.columns)
     if missing:
         raise ValueError(f"У CSV бракує колонок: {sorted(missing)}")
-    df = df[list(CSV_TO_ORM)].rename(columns=CSV_TO_ORM)
+    df = df[list(needed)].rename(columns=needed)
     df["last_updated"] = pd.to_datetime(df["last_updated"], format="%Y-%m-%d %H:%M")
     df["sunrise"] = df["sunrise"].map(_parse_time)
     df["sunset"] = df["sunset"].map(_parse_time)
@@ -72,6 +81,19 @@ def read_csv(path: Path) -> pd.DataFrame:
     # sunrise/sunset NOT NULL у моделі: рядки без коректного часу відкидаємо
     df = df.dropna(subset=["sunrise", "sunset"])
     return df
+
+
+def _to_entities(record: dict) -> WeatherObservation:
+    obs_kwargs = {attr: record[attr] for attr in OBSERVATION_COLUMNS.values()}
+    obs_kwargs["last_updated"] = obs_kwargs["last_updated"].to_pydatetime()
+    aq_kwargs = {attr: record[attr] for attr in AIR_QUALITY_COLUMNS.values()}
+    # приводимо numpy-типи до чистого Python, щоб драйвери обох БД їх прийняли
+    aq_kwargs = {k: (int(v) if k.endswith("_index") else float(v)) for k, v in aq_kwargs.items()}
+    obs_kwargs["humidity"] = int(obs_kwargs["humidity"])
+    obs_kwargs["wind_degree"] = int(obs_kwargs["wind_degree"])
+    obs_kwargs["wind_kph"] = float(obs_kwargs["wind_kph"])
+    obs_kwargs["temperature_celsius"] = float(obs_kwargs["temperature_celsius"])
+    return WeatherObservation(**obs_kwargs, air_quality=AirQuality(**aq_kwargs))
 
 
 class ImportService:
@@ -87,14 +109,12 @@ class ImportService:
             keys = list(
                 zip(df["country"], df["location_name"], df["last_updated"].dt.to_pydatetime())
             )
-            mask = [k not in existing for k in keys]
-            new_df = df[mask]
-            inserted = 0
+            new_df = df[[k not in existing for k in keys]]
             records = new_df.to_dict(orient="records")
+            inserted = 0
             for start in range(0, len(records), BATCH_SIZE):
-                batch = records[start : start + BATCH_SIZE]
-                for r in batch:
-                    r["last_updated"] = r["last_updated"].to_pydatetime()
-                inserted += repo.bulk_insert(batch)
+                batch = [_to_entities(r) for r in records[start : start + BATCH_SIZE]]
+                inserted += repo.add_all(batch)
+                session.expunge_all()  # не тримати 100k об'єктів у пам'яті сесії
                 progress(f"  вставлено {inserted}/{len(records)}")
         return ImportReport(total_rows=total, inserted=inserted, skipped_existing=total - inserted)

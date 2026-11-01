@@ -106,3 +106,43 @@ python -m weather.presentation.cli stats
 
 Стан бази: `alembic_version = 0001`, таблиця `weather_observations` (20 колонок) —
 `docs/schema_stage1_postgres.sql`.
+
+---
+
+## Етап 2 — рефакторинг: окрема таблиця `air_quality` (`stage2-air-quality-table`)
+
+Міграція `0002_extract_air_quality_table.py` виконує класичну схему **expand → migrate → contract**:
+
+1. **expand** — `CREATE TABLE air_quality` (`id`, `observation_id` FK → `weather_observations.id`
+   `ON DELETE CASCADE`, унікальний, + 8 колонок стану повітря);
+2. **migrate** — один переносимий запит
+   `INSERT INTO air_quality (...) SELECT id, air_quality_* FROM weather_observations`;
+3. **contract** — `DROP COLUMN` для 8 старих колонок (через `op.batch_alter_table`, щоб один код
+   працював і там, де `ALTER TABLE` обмежений).
+
+`downgrade()` робить зворотне: повертає колонки як nullable → корельований `UPDATE ... (SELECT ... FROM air_quality)`
+→ `NOT NULL` → `DROP TABLE air_quality`.
+
+### Перевірка, що дані не втрачено
+
+Контрольні суми по 107 963 рядках до і після міграції (та після `downgrade 0001` → `upgrade head`):
+
+| | `count(*)` | `sum(pm2_5)` | `sum(us_epa_index)` |
+|---|---|---|---|
+| до 0002 (`weather_observations.air_quality_*`) | 107 963 | 2 727 183.24 | 186 823 |
+| після 0002 (`air_quality` JOIN) | 107 963 | 2 727 183.24 | 186 823 |
+| після `downgrade 0001` | 107 963 | 2 727 183.24 | 186 823 (NULL-ів: 0) |
+
+`upgrade` ≈ 1.6 с, `downgrade` ≈ 30 с (корельовані `UPDATE` по 8 колонках — повільніше, ніж `INSERT … SELECT`).
+
+### Зміни в коді
+
+- `models.py`: новий клас `AirQuality`, зв'язок 1:1 `WeatherObservation.air_quality` (`relationship`, `cascade="all, delete-orphan"`).
+- `import_service.py`: один рядок CSV → два ORM-об'єкти; вставка через `session.add_all()` + `flush()`,
+  щоб SQLAlchemy сам проставив `observation_id` (ідентифікатори повертаються через `INSERT … RETURNING`
+  у Postgres або `lastrowid` у MySQL — код однаковий).
+- `repositories.py`: `AirQualityRepository`, `selectinload` для завантаження зв'язку одним додатковим запитом.
+- Імпорт на чисту базу з новою схемою перевірено окремо (`weather_test`, 8 555 рядків → 8 555 + 8 555), ідемпотентність збережена.
+
+Стан бази: `alembic_version = 0002`, таблиці `weather_observations` (12 колонок) + `air_quality` (10 колонок) —
+`docs/schema_stage2_postgres.sql`.

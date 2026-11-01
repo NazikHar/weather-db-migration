@@ -11,7 +11,7 @@ from pathlib import Path
 
 from weather.config import default_csv_path, get_database_url
 from weather.data.database import make_engine, session_scope
-from weather.data.repositories import WeatherObservationRepository
+from weather.data.repositories import AirQualityRepository, WeatherObservationRepository
 from weather.services.import_service import ImportService
 
 
@@ -32,8 +32,9 @@ def cmd_stats(args: argparse.Namespace) -> None:
         repo = WeatherObservationRepository(session)
         print(f"База: {get_database_url()}")
         print(f"Спостережень у weather_observations: {repo.count()}")
+        print(f"Записів у air_quality: {AirQualityRepository(session).count()}")
         for obs in repo.all(limit=3):
-            print(" ", obs)
+            print(" ", obs, obs.air_quality)
 
 
 def build_parser() -> argparse.ArgumentParser:
